@@ -2,6 +2,7 @@ import sqlite3
 import jwt
 import datetime
 import json
+import os
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from functools import wraps
@@ -473,4 +474,5 @@ def get_result():
 if __name__ == '__main__':
     init_db()
     # Restart the server loop automatically picks up changes with debug=True
-    app.run(debug=True, port=5000)
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=True)
