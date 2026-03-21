@@ -1,0 +1,159 @@
+:root {
+  --primary: #4a6fa5;
+  --bg: #f4f7f6;
+  --text: #333;
+  --border: #ddd;
+  --error: #d9534f;
+  --success: #5cb85c;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  background-color: var(--bg);
+  color: var(--text);
+  margin: 0;
+  padding: 0;
+}
+
+.app-container {
+  max-width: 800px;
+  margin: 0 auto;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.app-header {
+  background-color: var(--primary);
+  color: white;
+  padding: 1rem;
+  text-align: center;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+.main-content {
+  flex: 1;
+  padding: 2rem;
+}
+
+.card {
+  background: white;
+  border-radius: 8px;
+  padding: 2rem;
+  box-shadow: 0 4px 6px rgba(0,0,0,0.05);
+  margin-bottom: 1rem;
+}
+
+.form-group {
+  margin-bottom: 1rem;
+}
+
+label {
+  display: block;
+  margin-bottom: 0.5rem;
+  font-weight: 500;
+}
+
+input, select {
+  width: 100%;
+  padding: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  box-sizing: border-box;
+}
+
+button {
+  background-color: var(--primary);
+  color: white;
+  border: none;
+  padding: 0.75rem 1.5rem;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 1rem;
+  font-weight: 500;
+  width: 100%;
+}
+
+button:hover {
+  opacity: 0.9;
+}
+
+.btn-secondary {
+  background-color: #6c757d;
+}
+
+.error-msg {
+  color: var(--error);
+  padding: 0.5rem;
+  background-color: #fdf2f2;
+  border-left: 4px solid var(--error);
+  margin-bottom: 1rem;
+}
+
+.success-msg {
+  color: var(--success);
+  padding: 0.5rem;
+  background-color: #f2fdf2;
+  border-left: 4px solid var(--success);
+  margin-bottom: 1rem;
+}
+
+/* Tabs */
+.tabs {
+  display: flex;
+  margin-bottom: 1rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.tab {
+  padding: 0.5rem 1rem;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+}
+
+.tab.active {
+  border-bottom-color: var(--primary);
+  font-weight: bold;
+  color: var(--primary);
+}
+
+/* Exam Timer */
+.timer {
+  font-size: 1.5rem;
+  font-weight: bold;
+  text-align: center;
+  margin-bottom: 1rem;
+  padding: 1rem;
+  background: #eee;
+  border-radius: 4px;
+}
+
+.timer.warning {
+  color: var(--error);
+  background: #fdf2f2;
+}
+
+/* Options */
+.options-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.option-item {
+  display: block;
+  padding: 1rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+  background: #fff;
+}
+
+.option-item:hover {
+  background: #f9f9f9;
+}
+
+.option-item input {
+  margin-right: 1rem;
+  width: auto;
+}
