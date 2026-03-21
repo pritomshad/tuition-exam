@@ -8,7 +8,7 @@ from flask_cors import CORS
 from functools import wraps
 
 app = Flask(__name__)
-CORS(app)
+CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=False)
 app.config['SECRET_KEY'] = 'super-secret-exam-key'
 DB_NAME = 'exam_system.db'
 
