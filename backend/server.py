@@ -471,8 +471,9 @@ def get_result():
         'paper': evaluated_paper
     })
 
+init_db()
+
 if __name__ == '__main__':
-    init_db()
     # Restart the server loop automatically picks up changes with debug=True
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=True)
