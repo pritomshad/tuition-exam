@@ -2,3 +2,6 @@ Flask
 PyJWT
 flask-cors
 gunicorn
+pymongo
+dnspython
+requests

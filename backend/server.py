@@ -1,4 +1,3 @@
-import sqlite3
 import jwt
 import datetime
 import json
@@ -6,59 +5,32 @@ import os
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from functools import wraps
+from pymongo import MongoClient
+from bson.objectid import ObjectId
 
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=False)
 app.config['SECRET_KEY'] = 'super-secret-exam-key'
-DB_NAME = 'exam_system.db'
+
+MONGO_URI = os.environ.get('MONGO_URI', 'mongodb+srv://pritomd678_db_user:<db_password>@tuition-exam.zw8hih5.mongodb.net/?appName=tuition-exam')
+client = MongoClient(MONGO_URI)
+db = client['exam_system']
 
 def init_db():
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    # Admin table
-    c.execute('''CREATE TABLE IF NOT EXISTS admins
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE, password TEXT)''')
-    # Exam table
-    c.execute('''CREATE TABLE IF NOT EXISTS exams
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT)''')
-    # Questions table - ADDED marks
-    c.execute('''CREATE TABLE IF NOT EXISTS questions
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT, exam_id INTEGER, 
-                  question_text TEXT, options TEXT, correct_answer TEXT, 
-                  solving_time INTEGER, marks INTEGER DEFAULT 1, 
-                  FOREIGN KEY(exam_id) REFERENCES exams(id))''')
-    # Student passwords per exam
-    c.execute('''CREATE TABLE IF NOT EXISTS student_credentials
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT, exam_id INTEGER, 
-                  username TEXT, password TEXT, UNIQUE(exam_id, username),
-                  FOREIGN KEY(exam_id) REFERENCES exams(id))''')
-    # Student progress - ADDED evaluation_pending
-    c.execute('''CREATE TABLE IF NOT EXISTS student_progress
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT, exam_id INTEGER, username TEXT,
-                  current_q_index INTEGER DEFAULT 0, score INTEGER DEFAULT 0,
-                  q_start_time TIMESTAMP, finished BOOLEAN DEFAULT 0,
-                  evaluation_pending BOOLEAN DEFAULT 0,
-                  FOREIGN KEY(exam_id) REFERENCES exams(id))''')
-    # Student individual answers
-    c.execute('''CREATE TABLE IF NOT EXISTS student_answers
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT, exam_id INTEGER, username TEXT,
-                  question_id INTEGER, submitted_text TEXT, marks_awarded INTEGER, 
-                  evaluated BOOLEAN DEFAULT 0,
-                  FOREIGN KEY(exam_id) REFERENCES exams(id),
-                  FOREIGN KEY(question_id) REFERENCES questions(id))''')
-    
     # Insert default admin if none exists
-    c.execute("SELECT * FROM admins WHERE username='admin'")
-    if not c.fetchone():
-        c.execute("INSERT INTO admins (username, password) VALUES ('admin', 'admin')")
-    
-    conn.commit()
-    conn.close()
+    admin = db.admins.find_one({"username": "admin"})
+    if not admin:
+        db.admins.insert_one({"username": "admin", "password": "admin"})
+        
+    # We can create indexes here if necessary
+    db.student_credentials.create_index([("exam_id", 1), ("username", 1)], unique=True)
+    db.admins.create_index("username", unique=True)
 
-def get_db_connection():
-    conn = sqlite3.connect(DB_NAME)
-    conn.row_factory = sqlite3.Row
-    return conn
+# Helper function to convert ObjectId to string in documents
+def serialize_doc(doc):
+    if doc and '_id' in doc:
+        doc['id'] = str(doc.pop('_id'))
+    return doc
 
 # --- Authentication Decorators ---
 
@@ -101,10 +73,7 @@ def student_required(f):
 @app.route('/api/admin/login', methods=['POST'])
 def admin_login():
     data = request.json
-    conn = get_db_connection()
-    admin = conn.execute("SELECT * FROM admins WHERE username=? AND password=?", 
-                         (data.get('username'), data.get('password'))).fetchone()
-    conn.close()
+    admin = db.admins.find_one({"username": data.get('username'), "password": data.get('password')})
     
     if admin:
         token = jwt.encode({
@@ -122,19 +91,24 @@ def student_login():
     username = data.get('username')
     password = data.get('password')
     
-    conn = get_db_connection()
-    cred = conn.execute("SELECT * FROM student_credentials WHERE exam_id=? AND username=? AND password=?", 
-                        (exam_id, username, password)).fetchone()
+    cred = db.student_credentials.find_one({"exam_id": exam_id, "username": username, "password": password})
     
     if cred:
-        questions = conn.execute("SELECT solving_time FROM questions WHERE exam_id=?", (exam_id,)).fetchall()
-        total_time_seconds = sum(q['solving_time'] for q in questions)
+        questions = list(db.questions.find({"exam_id": exam_id}))
+        total_time_seconds = sum(q.get('solving_time', 0) for q in questions)
         expiry_time = datetime.datetime.utcnow() + datetime.timedelta(seconds=total_time_seconds + 300)
         
-        prog = conn.execute("SELECT * FROM student_progress WHERE exam_id=? AND username=?", (exam_id, username)).fetchone()
+        prog = db.student_progress.find_one({"exam_id": exam_id, "username": username})
         if not prog:
-            conn.execute("INSERT INTO student_progress (exam_id, username) VALUES (?, ?)", (exam_id, username))
-            conn.commit()
+            db.student_progress.insert_one({
+                "exam_id": exam_id, 
+                "username": username,
+                "current_q_index": 0,
+                "score": 0,
+                "q_start_time": None,
+                "finished": False,
+                "evaluation_pending": False
+            })
             
         token = jwt.encode({
             'username': username,
@@ -142,10 +116,8 @@ def student_login():
             'role': 'student',
             'exp': expiry_time
         }, app.config['SECRET_KEY'], algorithm="HS256")
-        conn.close()
         return jsonify({'token': token})
     
-    conn.close()
     return jsonify({'message': 'Invalid credentials or exam ID'}), 401
 
 
@@ -154,103 +126,105 @@ def student_login():
 @app.route('/api/admin/exams', methods=['GET', 'POST'])
 @admin_required
 def handle_exams():
-    conn = get_db_connection()
     if request.method == 'GET':
-        exams = conn.execute("SELECT * FROM exams").fetchall()
-        conn.close()
-        return jsonify([dict(ix) for ix in exams])
+        exams = list(db.exams.find())
+        return jsonify([serialize_doc(e) for e in exams])
     elif request.method == 'POST':
         data = request.json
-        cur = conn.execute("INSERT INTO exams (title) VALUES (?)", (data.get('title'),))
-        conn.commit()
-        exam_id = cur.lastrowid
-        conn.close()
-        return jsonify({'id': exam_id, 'message': 'Exam created successfully'})
+        res = db.exams.insert_one({"title": data.get('title')})
+        return jsonify({'id': str(res.inserted_id), 'message': 'Exam created successfully'})
 
-@app.route('/api/admin/exams/<int:exam_id>/questions', methods=['GET', 'POST'])
+@app.route('/api/admin/exams/<string:exam_id>/questions', methods=['GET', 'POST'])
 @admin_required
 def handle_questions(exam_id):
-    conn = get_db_connection()
     if request.method == 'GET':
-        questions = conn.execute("SELECT * FROM questions WHERE exam_id=? ORDER BY id", (exam_id,)).fetchall()
-        conn.close()
-        return jsonify([dict(q) for q in questions])
+        questions = list(db.questions.find({"exam_id": exam_id}))
+        # Sort questions by _id to keep consistent order
+        questions.sort(key=lambda x: str(x['_id']))
+        return jsonify([serialize_doc(q) for q in questions])
     elif request.method == 'POST':
         data = request.json
         marks = int(data.get('marks', 1))
-        conn.execute('''INSERT INTO questions 
-                        (exam_id, question_text, options, correct_answer, solving_time, marks) 
-                        VALUES (?, ?, ?, ?, ?, ?)''',
-                     (exam_id, data['question_text'], data['options'], 
-                      data['correct_answer'], data['solving_time'], marks))
-        conn.commit()
-        conn.close()
+        db.questions.insert_one({
+            "exam_id": exam_id,
+            "question_text": data.get('question_text'),
+            "options": data.get('options'),
+            "correct_answer": data.get('correct_answer'),
+            "solving_time": data.get('solving_time'),
+            "marks": marks
+        })
         return jsonify({'message': 'Question added successfully'})
 
-@app.route('/api/admin/exams/<int:exam_id>/questions/<int:q_id>', methods=['PUT', 'DELETE'])
+@app.route('/api/admin/exams/<string:exam_id>/questions/<string:q_id>', methods=['PUT', 'DELETE'])
 @admin_required
 def update_question(exam_id, q_id):
-    conn = get_db_connection()
     if request.method == 'PUT':
         data = request.json
+        update_data = {}
         if 'marks' in data:
-            conn.execute("UPDATE questions SET marks=? WHERE id=? AND exam_id=?", 
-                         (int(data['marks']), q_id, exam_id))
+            update_data['marks'] = int(data['marks'])
         if 'question_text' in data:
-             conn.execute("UPDATE questions SET question_text=?, options=?, correct_answer=?, solving_time=? WHERE id=? AND exam_id=?",
-                          (data['question_text'], data['options'], data['correct_answer'], data['solving_time'], q_id, exam_id))
-        conn.commit()
-        conn.close()
+            update_data['question_text'] = data['question_text']
+            update_data['options'] = data['options']
+            update_data['correct_answer'] = data['correct_answer']
+            update_data['solving_time'] = data['solving_time']
+            
+        if update_data:
+            db.questions.update_one({"_id": ObjectId(q_id), "exam_id": exam_id}, {"$set": update_data})
         return jsonify({'message': 'Question updated successfully'})
+    
     elif request.method == 'DELETE':
-        conn.execute("DELETE FROM questions WHERE id=? AND exam_id=?", (q_id, exam_id))
-        conn.commit()
-        conn.close()
+        db.questions.delete_one({"_id": ObjectId(q_id), "exam_id": exam_id})
         return jsonify({'message': 'Question deleted successfully'})
 
-@app.route('/api/admin/exams/<int:exam_id>/students', methods=['POST'])
+@app.route('/api/admin/exams/<string:exam_id>/students', methods=['POST'])
 @admin_required
 def add_student_credentials(exam_id):
     data = request.json
-    conn = get_db_connection()
     try:
-        conn.execute("INSERT INTO student_credentials (exam_id, username, password) VALUES (?, ?, ?)",
-                     (exam_id, data['username'], data['password']))
-        conn.commit()
+        db.student_credentials.insert_one({
+            "exam_id": exam_id,
+            "username": data['username'],
+            "password": data['password']
+        })
         msg = 'Student added to exam'
-    except sqlite3.IntegrityError:
-        msg = 'Student already exists for this exam'
-    conn.close()
+    except Exception as e:
+        # duplicate key error
+        if 'duplicate key error' in str(e).lower() or 'e11000' in str(e).lower():
+            msg = 'Student already exists for this exam'
+        else:
+            msg = str(e)
+            
     return jsonify({'message': msg})
 
-@app.route('/api/admin/exams/<int:exam_id>/results', methods=['GET'])
+@app.route('/api/admin/exams/<string:exam_id>/results', methods=['GET'])
 @admin_required
 def get_exam_results(exam_id):
-    conn = get_db_connection()
-    results = conn.execute("SELECT username, score, finished, evaluation_pending FROM student_progress WHERE exam_id=?", (exam_id,)).fetchall()
-    conn.close()
-    return jsonify([dict(ix) for ix in results])
+    results = list(db.student_progress.find(
+        {"exam_id": exam_id},
+        {"_id": 0, "username": 1, "score": 1, "finished": 1, "evaluation_pending": 1}
+    ))
+    return jsonify(results)
 
-@app.route('/api/admin/exams/<int:exam_id>/evaluation/<string:username>', methods=['GET'])
+@app.route('/api/admin/exams/<string:exam_id>/evaluation/<string:username>', methods=['GET'])
 @admin_required
 def get_student_evaluation(exam_id, username):
-    conn = get_db_connection()
-    # Fetch all questions and student's answers
-    questions = conn.execute("SELECT * FROM questions WHERE exam_id=? ORDER BY id", (exam_id,)).fetchall()
-    answers = conn.execute("SELECT * FROM student_answers WHERE exam_id=? AND username=?", (exam_id, username)).fetchall()
-    conn.close()
+    questions = list(db.questions.find({"exam_id": exam_id}))
+    questions.sort(key=lambda x: str(x['_id']))
     
-    answer_dict = {a['question_id']: dict(a) for a in answers}
+    answers = list(db.student_answers.find({"exam_id": exam_id, "username": username}))
+    
+    answer_dict = {str(a['question_id']): a for a in answers}
     
     paper = []
     for q in questions:
-        q_dict = dict(q)
-        ans = answer_dict.get(q['id'])
+        q_dict = serialize_doc(q)
+        ans = answer_dict.get(q_dict['id'])
         if ans:
-             q_dict['student_answer'] = ans['submitted_text']
-             q_dict['marks_awarded'] = ans['marks_awarded']
-             q_dict['evaluated'] = ans['evaluated']
-             q_dict['answer_id'] = ans['id']
+             q_dict['student_answer'] = ans.get('submitted_text')
+             q_dict['marks_awarded'] = ans.get('marks_awarded', 0)
+             q_dict['evaluated'] = bool(ans.get('evaluated', False))
+             q_dict['answer_id'] = str(ans['_id'])
         else:
              q_dict['student_answer'] = None
              q_dict['marks_awarded'] = 0
@@ -260,35 +234,33 @@ def get_student_evaluation(exam_id, username):
         
     return jsonify(paper)
 
-@app.route('/api/admin/exams/<int:exam_id>/evaluation/<string:username>', methods=['POST'])
+@app.route('/api/admin/exams/<string:exam_id>/evaluation/<string:username>', methods=['POST'])
 @admin_required
 def submit_student_evaluation(exam_id, username):
     data = request.json # Expected format: { answer_id: marks_awarded, ... }
-    conn = get_db_connection()
     
     # Update individual answers
     for ans_id, marks in data.items():
-        conn.execute("UPDATE student_answers SET marks_awarded=?, evaluated=1 WHERE id=? AND exam_id=? AND username=?", 
-                     (int(marks), int(ans_id), exam_id, username))
+        db.student_answers.update_one(
+            {"_id": ObjectId(ans_id), "exam_id": exam_id, "username": username},
+            {"$set": {"marks_awarded": int(marks), "evaluated": True}}
+        )
     
     # Recalculate total score
-    total_score = conn.execute("SELECT SUM(marks_awarded) as total FROM student_answers WHERE exam_id=? AND username=?", 
-                               (exam_id, username)).fetchone()['total']
-    if total_score is None: 
-        total_score = 0
+    all_answers = list(db.student_answers.find({"exam_id": exam_id, "username": username}))
+    total_score = sum(ans.get('marks_awarded', 0) for ans in all_answers)
         
     # Check if all questions are evaluated
-    total_q = conn.execute("SELECT COUNT(*) as t FROM questions WHERE exam_id=?", (exam_id,)).fetchone()['t']
-    eval_q = conn.execute("SELECT COUNT(*) as t FROM student_answers WHERE exam_id=? AND username=? AND evaluated=1", 
-                          (exam_id, username)).fetchone()['t']
+    total_q = db.questions.count_documents({"exam_id": exam_id})
+    eval_q = len([a for a in all_answers if a.get('evaluated', False)])
                           
     is_pending = (eval_q < total_q)
     
-    conn.execute("UPDATE student_progress SET score=?, evaluation_pending=? WHERE exam_id=? AND username=?", 
-                 (total_score, 1 if is_pending else 0, exam_id, username))
+    db.student_progress.update_one(
+        {"exam_id": exam_id, "username": username},
+        {"$set": {"score": total_score, "evaluation_pending": is_pending}}
+    )
                  
-    conn.commit()
-    conn.close()
     return jsonify({'message': 'Evaluation saved successfully', 'score': total_score})
 
 
@@ -301,42 +273,44 @@ def get_current_question():
     exam_id = student['exam_id']
     username = student['username']
     
-    conn = get_db_connection()
-    prog = conn.execute("SELECT * FROM student_progress WHERE exam_id=? AND username=?", (exam_id, username)).fetchone()
+    prog = db.student_progress.find_one({"exam_id": exam_id, "username": username})
     
-    if prog['finished']:
-        conn.close()
+    if prog.get('finished'):
         return jsonify({'message': 'Exam finished', 'finished': True})
         
-    questions = conn.execute("SELECT * FROM questions WHERE exam_id=? ORDER BY id", (exam_id,)).fetchall()
+    questions = list(db.questions.find({"exam_id": exam_id}))
+    questions.sort(key=lambda x: str(x['_id']))
     
-    if prog['current_q_index'] >= len(questions):
-        conn.execute("UPDATE student_progress SET finished=1 WHERE exam_id=? AND username=?", (exam_id, username))
-        conn.commit()
-        conn.close()
+    current_index = prog.get('current_q_index', 0)
+    
+    if current_index >= len(questions):
+        db.student_progress.update_one(
+            {"exam_id": exam_id, "username": username},
+            {"$set": {"finished": True}}
+        )
         return jsonify({'message': 'Exam finished', 'finished': True})
         
-    current_q = dict(questions[prog['current_q_index']])
+    current_q = serialize_doc(questions[current_index])
     
-    if not prog['q_start_time']:
+    q_start_time_iso = prog.get('q_start_time')
+    if not q_start_time_iso:
         now = datetime.datetime.utcnow().isoformat()
-        conn.execute("UPDATE student_progress SET q_start_time=? WHERE exam_id=? AND username=?", 
-                     (now, exam_id, username))
-        conn.commit()
+        db.student_progress.update_one(
+            {"exam_id": exam_id, "username": username},
+            {"$set": {"q_start_time": now}}
+        )
         q_start = datetime.datetime.fromisoformat(now)
     else:
-        q_start = datetime.datetime.fromisoformat(prog['q_start_time'])
-        
-    conn.close()
+        q_start = datetime.datetime.fromisoformat(q_start_time_iso)
     
     current_q.pop('correct_answer', None) # Hide from student
     
     elapsed = (datetime.datetime.utcnow() - q_start).total_seconds()
-    time_remaining = max(0, current_q['solving_time'] - int(elapsed))
+    time_remaining = max(0, current_q.get('solving_time', 0) - int(elapsed))
     
     current_q['time_remaining'] = time_remaining
     current_q['total_questions'] = len(questions)
-    current_q['current_index'] = prog['current_q_index']
+    current_q['current_index'] = current_index
     
     return jsonify(current_q)
 
@@ -349,115 +323,121 @@ def submit_answer():
     data = request.json
     submitted_answer = data.get('answer', '')
     
-    conn = get_db_connection()
-    prog = conn.execute("SELECT * FROM student_progress WHERE exam_id=? AND username=?", (exam_id, username)).fetchone()
+    prog = db.student_progress.find_one({"exam_id": exam_id, "username": username})
     
-    if prog['finished']:
-        conn.close()
+    if prog.get('finished'):
         return jsonify({'message': 'Exam already finished'}), 400
         
-    questions = conn.execute("SELECT * FROM questions WHERE exam_id=? ORDER BY id", (exam_id,)).fetchall()
-    if prog['current_q_index'] >= len(questions):
-        conn.close()
+    questions = list(db.questions.find({"exam_id": exam_id}))
+    questions.sort(key=lambda x: str(x['_id']))
+    
+    current_index = prog.get('current_q_index', 0)
+    
+    if current_index >= len(questions):
         return jsonify({'message': 'No more questions'}), 400
         
-    current_q = questions[prog['current_q_index']]
+    current_q = serialize_doc(questions[current_index])
     
     # Enforce time limits
-    if prog['q_start_time']:
-        q_start = datetime.datetime.fromisoformat(prog['q_start_time'])
+    q_start_time_iso = prog.get('q_start_time')
+    if q_start_time_iso:
+        q_start = datetime.datetime.fromisoformat(q_start_time_iso)
         elapsed = (datetime.datetime.utcnow() - q_start).total_seconds()
-        if elapsed > current_q['solving_time'] + 5:
+        if elapsed > current_q.get('solving_time', 0) + 5:
             submitted_answer = '' # Timed out
             
     # Check if short answer or MCQ
-    # A question is short answer if options is empty array '[]' or empty string
     is_short_answer = False
     try:
-        opts = json.loads(current_q['options'])
+        opts = json.loads(current_q.get('options', '[]'))
         if not opts or len(opts) == 0:
             is_short_answer = True
     except:
-        if not current_q['options'] or current_q['options'].strip() == '':
+        if not current_q.get('options') or current_q['options'].strip() == '':
             is_short_answer = True
 
     marks_awarded = 0
-    evaluated = 0
+    evaluated = False
     requires_eval = False
 
     if is_short_answer:
         # short answer -> manual evaluation needed
         marks_awarded = 0
-        evaluated = 0
+        evaluated = False
         requires_eval = True
     else:
         # MCQ -> auto evaluation
-        if submitted_answer and submitted_answer.strip() == current_q['correct_answer'].strip():
-            marks_awarded = current_q['marks']
-        evaluated = 1
+        correct_answ = current_q.get('correct_answer', '')
+        if submitted_answer and submitted_answer.strip() == correct_answ.strip():
+            marks_awarded = current_q.get('marks', 1)
+        evaluated = True
         
     # Save the individual answer
-    conn.execute('''INSERT INTO student_answers 
-                    (exam_id, username, question_id, submitted_text, marks_awarded, evaluated) 
-                    VALUES (?, ?, ?, ?, ?, ?)''',
-                 (exam_id, username, current_q['id'], submitted_answer, marks_awarded, evaluated))
+    db.student_answers.insert_one({
+        "exam_id": exam_id,
+        "username": username,
+        "question_id": current_q['id'],
+        "submitted_text": submitted_answer,
+        "marks_awarded": marks_awarded,
+        "evaluated": evaluated
+    })
                  
-    new_score = prog['score'] + marks_awarded
-    new_index = prog['current_q_index'] + 1
-    finished = 1 if new_index >= len(questions) else 0
+    new_score = prog.get('score', 0) + marks_awarded
+    new_index = current_index + 1
+    finished = True if new_index >= len(questions) else False
     
     # Has pending evaluations if it required eval for this question OR it already had pending
-    is_pending = 1 if (requires_eval or prog['evaluation_pending']) else 0
+    is_pending = True if (requires_eval or prog.get('evaluation_pending', False)) else False
     
-    conn.execute('''UPDATE student_progress 
-                    SET current_q_index=?, score=?, q_start_time=NULL, finished=?, evaluation_pending=? 
-                    WHERE exam_id=? AND username=?''', 
-                 (new_index, new_score, finished, is_pending, exam_id, username))
-    conn.commit()
-    conn.close()
+    db.student_progress.update_one(
+        {"exam_id": exam_id, "username": username},
+        {"$set": {
+            "current_q_index": new_index,
+            "score": new_score,
+            "q_start_time": None,
+            "finished": finished,
+            "evaluation_pending": is_pending
+        }}
+    )
     
-    return jsonify({'success': True, 'finished': bool(finished)})
+    return jsonify({'success': True, 'finished': finished})
 
 @app.route('/api/student/result', methods=['GET'])
 @student_required
 def get_result():
     student = request.student_data
-    conn = get_db_connection()
-    prog = conn.execute("SELECT score, finished, evaluation_pending FROM student_progress WHERE exam_id=? AND username=?", 
-                        (student['exam_id'], student['username'])).fetchone()
-                        
-    # Total possible marks
-    total_marks_row = conn.execute("SELECT SUM(marks) as total FROM questions WHERE exam_id=?", 
-                             (student['exam_id'],)).fetchone()
-    total_marks = total_marks_row['total'] if (total_marks_row and total_marks_row['total']) else 0
-
-    if not prog['finished']:
-        conn.close()
+    exam_id = student['exam_id']
+    username = student['username']
+    
+    prog = db.student_progress.find_one({"exam_id": exam_id, "username": username})
+    
+    if not prog or not prog.get('finished'):
         return jsonify({'message': 'Exam not finished yet'}), 400
         
-    if prog['evaluation_pending']:
-        conn.close()
+    if prog.get('evaluation_pending'):
         return jsonify({
             'finished': True,
             'evaluation_pending': True,
             'message': 'Evaluation is currently pending from the teacher.'
         })
 
+    # Total possible marks
+    questions = list(db.questions.find({"exam_id": exam_id}))
+    questions.sort(key=lambda x: str(x['_id']))
+    total_marks = sum(q.get('marks', 1) for q in questions)
+
     # Fetch evaluated paper
-    questions = conn.execute("SELECT * FROM questions WHERE exam_id=? ORDER BY id", (student['exam_id'],)).fetchall()
-    answers = conn.execute("SELECT * FROM student_answers WHERE exam_id=? AND username=?", 
-                           (student['exam_id'], student['username'])).fetchall()
-    conn.close()
+    answers = list(db.student_answers.find({"exam_id": exam_id, "username": username}))
     
-    answer_dict = {a['question_id']: dict(a) for a in answers}
+    answer_dict = {str(a['question_id']): a for a in answers}
     
     evaluated_paper = []
     for q in questions:
-        q_dict = dict(q)
-        ans = answer_dict.get(q['id'])
+        q_dict = serialize_doc(q)
+        ans = answer_dict.get(q_dict['id'])
         if ans:
-             q_dict['student_answer'] = ans['submitted_text']
-             q_dict['marks_awarded'] = ans['marks_awarded']
+             q_dict['student_answer'] = ans.get('submitted_text')
+             q_dict['marks_awarded'] = ans.get('marks_awarded', 0)
         else:
              q_dict['student_answer'] = None
              q_dict['marks_awarded'] = 0
@@ -466,7 +446,7 @@ def get_result():
     return jsonify({
         'finished': True,
         'evaluation_pending': False,
-        'score': prog['score'],
+        'score': prog.get('score', 0),
         'total': total_marks,
         'paper': evaluated_paper
     })
@@ -474,6 +454,6 @@ def get_result():
 init_db()
 
 if __name__ == '__main__':
-    # Restart the server loop automatically picks up changes with debug=True
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=True)
+
