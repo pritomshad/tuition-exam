@@ -19,7 +19,7 @@ function LoginPage() {
         const res = await api.post('/student/login', {
           username,
           password,
-          exam_id: parseInt(examId)
+          exam_id: examId
         });
         localStorage.setItem('token', res.data.token);
         localStorage.setItem('role', 'student');
@@ -86,7 +86,7 @@ function LoginPage() {
           <div className="form-group">
             <label>Exam ID</label>
             <input 
-              type="number" 
+              type="text" 
               value={examId} 
               onChange={(e) => setExamId(e.target.value)}
               required
