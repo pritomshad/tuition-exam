@@ -400,7 +400,15 @@ def submit_answer():
         }}
     )
     
-    return jsonify({'success': True, 'finished': finished})
+    correct_answ = current_q.get('correct_answer', '')
+    return jsonify({
+        'success': True,
+        'finished': finished,
+        'correct_answer': correct_answ,
+        'is_correct': None if is_short_answer else (
+            bool(submitted_answer and submitted_answer.strip() == correct_answ.strip())
+        )
+    })
 
 @app.route('/api/student/result', methods=['GET'])
 @student_required
